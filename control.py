@@ -42,7 +42,7 @@ class pid_controller:
 
         if log:
             print("error {}, p {}, i {}, d {}".format(error, p, i, d))
-        return p + i + d
+        return (p + i + d, p, i, d)
 
 class ksp:
     def __init__(self, game_address="128.0.0.1", resolution=100):
@@ -54,12 +54,16 @@ class ksp:
         self.attitude = self.vessel.flight(self.vessel.surface_reference_frame)
         self.control = self.vessel.control
         self.time_interval = resolution # time between updates in ms
-        self.pitch_controller = pid_controller(3/90, 2, 0.2, 0.1, self.time_interval/1000)
+        self.pitch_controller = pid_controller(3/90, 2.5, 0.2, 0.1, self.time_interval/1000)
         self.roll_controller = pid_controller(0, 0.4, 0.1, 0.05, self.time_interval/1000)
         #self.alt_controller = pid_controller(18000/25000, 3.5, 0.1, 0.55, 0.1, max_pitch=25)
-        self.pitch_history = deque(maxlen=int(5*1000/self.time_interval)) # holds 5*1000ms worth of data
-        self.history = deque(maxlen=int(5*1000/self.time_interval)) # holds 5*1000ms worth of data
-        self.pitch_history.append(0)
+        self.data_history = []
+        datapoint_nb = int(5*1000/self.time_interval) # holds 5*1000ms worth of data
+        for i in range(0, 4):
+            self.data_history.append(deque(maxlen=datapoint_nb))
+            self.data_history[i].append(0)
+
+        self.history = deque(maxlen=datapoint_nb)
         self.history.append(0)
 
     def plot_update(self, frame, axes, plot_data):
@@ -69,12 +73,19 @@ class ksp:
         attitude = self.attitude
         print("pitch : {}\theading : {}\troll: {}\tAoA : {}".format(attitude.pitch, attitude.heading, attitude.roll, attitude.angle_of_attack))
         #c.pitch = alt_controller.control(p_flight.mean_altitude/25000, log=True, pitch=attitude.pitch)
-        pitch = self.pitch_controller.control(attitude.pitch/90, log=True)
-        self.pitch_history.append(pitch)
-        self.history.append(self.history[-1] + self.time_interval/1000)
+        self.control.roll = self.roll_controller.control(attitude.roll/90)[0]
+        (pitch, p, i, d) = self.pitch_controller.control(attitude.pitch/90, log=True)
         self.control.pitch = pitch
-        self.control.roll = self.roll_controller.control(attitude.roll/90)
-        plot_data[0].set_data(self.history, self.pitch_history)
+
+        self.data_history[0].append(pitch)
+        self.data_history[1].append(p)
+        self.data_history[2].append(i)
+        self.data_history[3].append(d)
+        self.history.append(self.history[-1] + self.time_interval/1000)
+
+        for i in range(0, len(self.data_history)):
+            plot_data[i].set_data(self.history, self.data_history[i])
+
         axes.set_xlim(self.history[0], max(5, self.history[-1]))
         return (axes, plot_data)
 
@@ -83,7 +94,8 @@ class ksp:
         self.control.sas = False
         fig = pyplot.figure()
         axes = pyplot.axes(ylim=(-1.5, 1.5), xlim=(0, 5))
-        plot_data = axes.plot([], [])
+        plot_data = axes.plot([], [], 'b', [], [], 'c', [], [], 'r', [], [], 'm')
+        axes.legend(plot_data, ['pitch input', 'p value', 'i value', 'd value'])
         anim = animation.FuncAnimation(fig, self.plot_update, fargs=(axes, plot_data), interval=self.time_interval) # a frame every time_interval
         try:
             pyplot.show()
