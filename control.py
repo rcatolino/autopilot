@@ -2,10 +2,12 @@
 
 import krpc
 import math
+import numpy
 import time
 from collections import deque
 from matplotlib import pyplot
 from matplotlib import animation
+from numpy import fft
 
 class pid_controller:
     def __init__(self, setpoint_value, kp, ki, kd, kt, max_pitch=0):
@@ -13,6 +15,7 @@ class pid_controller:
         self.setpoint(setpoint_value)
         self.kt = kt
         self.max_pitch = max_pitch
+        self.int_saturation = 0.5
 
     def setpoint(self, setpoint_value):
         self.sp = setpoint_value
@@ -33,8 +36,8 @@ class pid_controller:
         p = self.kp * error
 
         self.error_sum += error * self.kt
-        if math.fabs(self.error_sum) * self.ki > 0.4:
-            self.error_sum = math.copysign(1, self.error_sum)*0.4/self.ki
+        if math.fabs(self.error_sum) * self.ki > self.int_saturation:
+            self.error_sum = math.copysign(1, self.error_sum)*self.int_saturation/self.ki
         i = self.ki * self.error_sum
 
         d = self.kd * (error - self.last_error) / self.kt
@@ -54,19 +57,19 @@ class ksp:
         self.attitude = self.vessel.flight(self.vessel.surface_reference_frame)
         self.control = self.vessel.control
         self.time_interval = resolution # time between updates in ms
-        self.pitch_controller = pid_controller(3/90, 2.5, 0.2, 0.1, self.time_interval/1000)
+        self.pitch_controller = pid_controller(7/90, 2.5, 0.2, 0.1, self.time_interval/1000)
         self.roll_controller = pid_controller(0, 0.4, 0.1, 0.05, self.time_interval/1000)
         #self.alt_controller = pid_controller(18000/25000, 3.5, 0.1, 0.55, 0.1, max_pitch=25)
         self.data_history = []
         datapoint_nb = int(5*1000/self.time_interval) # holds 5*1000ms worth of data
-        for i in range(0, 4):
+        for i in range(0, 5):
             self.data_history.append(deque(maxlen=datapoint_nb))
             self.data_history[i].append(0)
 
         self.history = deque(maxlen=datapoint_nb)
         self.history.append(0)
 
-    def plot_update(self, frame, axes, plot_data):
+    def plot_update(self, frame, axes, control_plot, parameter_plot, pv_transform_plot, cv_transform_plot):
         #cr = pos_ctrl.vertical_speed
         #alt = p_flight.mean_altitude
         #print("climbing rate : {}\taltitude : {}".format(cr, alt))
@@ -81,22 +84,47 @@ class ksp:
         self.data_history[1].append(p)
         self.data_history[2].append(i)
         self.data_history[3].append(d)
+        self.data_history[4].append(attitude.pitch)
         self.history.append(self.history[-1] + self.time_interval/1000)
 
-        for i in range(0, len(self.data_history)):
-            plot_data[i].set_data(self.history, self.data_history[i])
+        for i in range(0, len(self.data_history)-1):
+            control_plot[i].set_data(self.history, self.data_history[i])
 
+        parameter_plot[0].set_data(self.history, self.data_history[4])
         axes.set_xlim(self.history[0], max(5, self.history[-1]))
-        return (axes, plot_data)
+
+        if len(self.history) > 10:
+            pv_transform = fft.fftshift(fft.rfft(self.data_history[4]))
+            cv_transform = fft.fftshift(fft.rfft(self.data_history[0]))
+            freqs = fft.fftshift(fft.fftfreq(len(cv_transform)))
+            pv_transform_plot[0].set_data(freqs, numpy.abs(pv_transform))
+            cv_transform_plot[0].set_data(freqs, numpy.abs(cv_transform))
+
+        return (axes, control_plot, parameter_plot, pv_transform_plot, cv_transform_plot)
 
     def run_ap(self):
         sas_state = self.control.sas
         self.control.sas = False
         fig = pyplot.figure()
-        axes = pyplot.axes(ylim=(-1.5, 1.5), xlim=(0, 5))
-        plot_data = axes.plot([], [], 'b', [], [], 'c', [], [], 'r', [], [], 'm')
-        axes.legend(plot_data, ['pitch input', 'p value', 'i value', 'd value'])
-        anim = animation.FuncAnimation(fig, self.plot_update, fargs=(axes, plot_data), interval=self.time_interval) # a frame every time_interval
+        control_axes = fig.add_subplot(2,2,1)
+        parameter_axes = fig.add_subplot(2,2,3, sharex=control_axes)
+        pv_transform_axes = fig.add_subplot(2,2,2)
+        cv_transform_axes = fig.add_subplot(2,2,4, sharex=pv_transform_axes)
+
+        control_axes.set_xlim(0, 5)
+        control_axes.set_ylim(-1.5, 1.5)
+        parameter_axes.set_ylim(-40, 40)
+        pv_transform_axes.set_xlim(-5, 5)
+        pv_transform_axes.set_ylim(0, 80)
+        cv_transform_axes.set_ylim(-10, 10)
+
+        control_plot = control_axes.plot([], [], 'b', [], [], 'c', [], [], 'r', [], [], 'm')
+        parameter_plot = parameter_axes.plot([], [], 'b')
+        pv_transform_plot = pv_transform_axes.plot([], [])
+        cv_transform_plot = cv_transform_axes.plot([], [])
+        control_axes.legend(control_plot, ['pitch input', 'p value', 'i value', 'd value'], loc=3)
+        parameter_axes.legend(parameter_plot, ['pitch'], loc=3)
+        anim = animation.FuncAnimation(fig, self.plot_update, fargs=(control_axes, control_plot, parameter_plot, pv_transform_plot, cv_transform_plot), interval=self.time_interval) # a frame every time_interval
         try:
             pyplot.show()
         except KeyboardInterrupt:
