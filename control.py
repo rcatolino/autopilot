@@ -9,6 +9,14 @@ from matplotlib import pyplot
 from matplotlib import animation
 from numpy import fft
 
+
+def bandstop(transform, bandwidth=3):
+    ftransform = transform
+    ftransform[0] = 0
+    ftransform[1] = 0
+    ftransform[-1] = 0
+    return ftransform
+
 class pid_controller:
     def __init__(self, setpoint_value, kp, ki, kd, kt, max_pitch=0):
         self.set_gains(kp, ki, kd)
@@ -57,10 +65,11 @@ class ksp:
         self.attitude = self.vessel.flight(self.vessel.surface_reference_frame)
         self.control = self.vessel.control
         self.time_interval = resolution # time between updates in ms
-        self.pitch_controller = pid_controller(7/90, 2.5, 0.2, 0.1, self.time_interval/1000)
+        self.pitch_controller = pid_controller(6/90, 3.5, 0.3, 0.01, self.time_interval/1000)
         self.roll_controller = pid_controller(0, 0.4, 0.1, 0.05, self.time_interval/1000)
         #self.alt_controller = pid_controller(18000/25000, 3.5, 0.1, 0.55, 0.1, max_pitch=25)
         self.data_history = []
+        self.pv_correction = 0
         datapoint_nb = int(5*1000/self.time_interval) # holds 5*1000ms worth of data
         for i in range(0, 5):
             self.data_history.append(deque(maxlen=datapoint_nb))
@@ -74,17 +83,19 @@ class ksp:
         #alt = p_flight.mean_altitude
         #print("climbing rate : {}\taltitude : {}".format(cr, alt))
         attitude = self.attitude
-        print("pitch : {}\theading : {}\troll: {}\tAoA : {}".format(attitude.pitch, attitude.heading, attitude.roll, attitude.angle_of_attack))
+        apitch = attitude.pitch
+        #print("pitch : {}\theading : {}\troll: {}\tAoA : {}".format(apitch, attitude.heading, attitude.roll, attitude.angle_of_attack))
         #c.pitch = alt_controller.control(p_flight.mean_altitude/25000, log=True, pitch=attitude.pitch)
         self.control.roll = self.roll_controller.control(attitude.roll/90)[0]
-        (pitch, p, i, d) = self.pitch_controller.control(attitude.pitch/90, log=True)
+        print("correction {}, pitch {}, pitch corrected {}".format(self.pv_correction, apitch, apitch - self.pv_correction))
+        (pitch, p, i, d) = self.pitch_controller.control((apitch - self.pv_correction)/90)
         self.control.pitch = pitch
 
         self.data_history[0].append(pitch)
         self.data_history[1].append(p)
         self.data_history[2].append(i)
         self.data_history[3].append(d)
-        self.data_history[4].append(attitude.pitch)
+        self.data_history[4].append(apitch)
         self.history.append(self.history[-1] + self.time_interval/1000)
 
         for i in range(0, len(self.data_history)-1):
@@ -94,11 +105,17 @@ class ksp:
         axes.set_xlim(self.history[0], max(5, self.history[-1]))
 
         if len(self.history) > 10:
-            pv_transform = fft.fftshift(fft.rfft(self.data_history[4]))
-            cv_transform = fft.fftshift(fft.rfft(self.data_history[0]))
+            pv_transform = fft.rfft(self.data_history[4])
+            cv_transform = fft.rfft(self.data_history[0])
             freqs = fft.fftshift(fft.fftfreq(len(cv_transform)))
-            pv_transform_plot[0].set_data(freqs, numpy.abs(pv_transform))
-            cv_transform_plot[0].set_data(freqs, numpy.abs(cv_transform))
+            pv_transform_plot[0].set_data(freqs, numpy.abs(fft.fftshift(pv_transform)))
+            cv_transform_plot[0].set_data(freqs, numpy.abs(fft.fftshift(bandstop(pv_transform))))
+
+            ipv_transform = fft.irfft(bandstop(pv_transform), len(self.history))
+            parameter_plot[1].set_data(list(self.history)[0:len(ipv_transform)], ipv_transform)
+            parameter_plot[2].set_data(self.history, self.data_history[4] - ipv_transform)
+            print("last itransform {}, last pitch {}, diff {}".format(ipv_transform[-1], apitch, apitch - ipv_transform[-1]))
+            self.pv_correction = 2*ipv_transform[-1] - ipv_transform[-2]
 
         return (axes, control_plot, parameter_plot, pv_transform_plot, cv_transform_plot)
 
@@ -116,14 +133,14 @@ class ksp:
         parameter_axes.set_ylim(-40, 40)
         pv_transform_axes.set_xlim(-5, 5)
         pv_transform_axes.set_ylim(0, 80)
-        cv_transform_axes.set_ylim(-10, 10)
+        cv_transform_axes.set_ylim(0, 50)
 
         control_plot = control_axes.plot([], [], 'b', [], [], 'c', [], [], 'r', [], [], 'm')
-        parameter_plot = parameter_axes.plot([], [], 'b')
+        parameter_plot = parameter_axes.plot([], [], 'b', [], [], 'r', [], [], 'm')
         pv_transform_plot = pv_transform_axes.plot([], [])
         cv_transform_plot = cv_transform_axes.plot([], [])
         control_axes.legend(control_plot, ['pitch input', 'p value', 'i value', 'd value'], loc=3)
-        parameter_axes.legend(parameter_plot, ['pitch'], loc=3)
+        parameter_axes.legend(parameter_plot, ['pitch', 'pitch noise', 'filtered pitch'], loc=3)
         anim = animation.FuncAnimation(fig, self.plot_update, fargs=(control_axes, control_plot, parameter_plot, pv_transform_plot, cv_transform_plot), interval=self.time_interval) # a frame every time_interval
         try:
             pyplot.show()
