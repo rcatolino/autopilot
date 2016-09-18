@@ -31,12 +31,18 @@ def bandstop(transform, cutoff=0.1):
     return ftransform
 
 class pid_controller:
-    def __init__(self, setpoint_value, kp, ki, kd, kt, max_pitch=0):
+    def __init__(self, setpoint_value, kp, ki, kd, time_resolution, time_window, max_pitch=0):
         self.set_gains(kp, ki, kd)
         self.setpoint(setpoint_value)
-        self.kt = kt
+        self.kt = time_resolution/1000
         self.max_pitch = max_pitch
         self.int_saturation = 0.5
+
+        history_size = int(time_window/time_resolution)
+        self.p_history = deque(maxlen=history_size)
+        self.i_history = deque(maxlen=history_size)
+        self.d_history = deque(maxlen=history_size)
+        self.cv_history = deque(maxlen=history_size)
 
     def setpoint(self, setpoint_value):
         self.sp = setpoint_value
@@ -66,7 +72,11 @@ class pid_controller:
 
         if log:
             print("error {}, p {}, i {}, d {}".format(error, p, i, d))
-        return (p + i + d, p, i, d)
+        self.p_history.append(p)
+        self.i_history.append(i)
+        self.d_history.append(d)
+        self.cv_history.append(p+i+d)
+        return p + i + d
 
 class pv_filter:
     def __init__(self, time_resolution, time_window): # in ms
@@ -97,38 +107,28 @@ class autopilot:
         self.time_window = 5000 # history range in ms
         self.pitch_target = pitch_target
 
-        datapoint_nb = int(self.time_window/self.time_resolution) # holds 5*1000ms worth of data
-        self.history = deque(maxlen=datapoint_nb)
-        self.data_history = []
-        for i in range(0, 4):
-            self.data_history.append(deque(maxlen=datapoint_nb))
+        history_size = int(self.time_window/self.time_resolution) # holds 5000ms worth of data
+        self.history = deque(maxlen=history_size)
 
         self.pitch_filter = pv_filter(self.time_resolution, self.time_window)
-        self.pitch_controller = pid_controller(self.pitch_target/90, 3.5, 0.3, 0.01, self.time_resolution/1000)
-        self.roll_controller = pid_controller(0, 0.4, 0.1, 0.05, self.time_resolution/1000)
+        self.pitch_controller = pid_controller(self.pitch_target/90, 3.5, 0.3, 0.01, self.time_resolution, self.time_window)
+        self.roll_controller = pid_controller(0, 0.4, 0.1, 0.05, self.time_resolution, self.time_window)
 
     def update_callback(self, frame, axes, subplots):
         attitude = self.attitude
         pitch = attitude.pitch
 
-        self.control.roll = self.roll_controller.control(attitude.roll/90)[0]
+        self.control.roll = self.roll_controller.control(attitude.roll/90)
         process_pitch = self.pitch_filter.get_pv_smoothed(pitch)
         print("process pitch {}, corrected pitch {}".format(pitch, process_pitch))
-        (control_pitch, p, i, d) = self.pitch_controller.control(process_pitch/90)
-        self.control.pitch = control_pitch
+        self.control.pitch = self.pitch_controller.control(process_pitch/90)
 
-        self.update_flight_data(control_pitch, p, i, d)
-        return self.update_plots(axes, subplots)
-
-    def update_flight_data(self, control_var, p, i, d):
-        self.data_history[0].append(control_var)
-        self.data_history[1].append(p)
-        self.data_history[2].append(i)
-        self.data_history[3].append(d)
         try:
             self.history.append(self.history[-1] + self.time_resolution/1000)
         except IndexError:
             self.history.append(0)
+
+        return self.update_plots(axes, subplots)
 
     def update_plots(self, axes, subplots):
         control_plot = subplots[0]
@@ -138,8 +138,10 @@ class autopilot:
             process_plot[1].set_data(self.history, self.pitch_filter.pv_smoothed)
 
         axes.set_xlim(self.history[0], max(5, self.history[-1]))
-        for i in range(0, len(self.data_history)):
-            control_plot[i].set_data(self.history, self.data_history[i])
+        control_plot[0].set_data(self.history, self.pitch_controller.cv_history)
+        control_plot[1].set_data(self.history, self.pitch_controller.p_history)
+        control_plot[2].set_data(self.history, self.pitch_controller.i_history)
+        control_plot[3].set_data(self.history, self.pitch_controller.d_history)
 
         """
         if len(pv_fft) > 0:
