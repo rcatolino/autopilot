@@ -9,13 +9,25 @@ from matplotlib import pyplot
 from matplotlib import animation
 from numpy import fft
 
-
-def bandstop(transform, bandwidth=3):
+def bandpass(transform, cutoff=0.1):
     ftransform = numpy.copy(transform)
-    ftransform[0] = 0
-    ftransform[1] = 0
-    ftransform[2] = 0
-    ftransform[-1] = 0
+    freqs = fft.fftfreq(len(ftransform))
+    for i in range(0, len(ftransform)):
+        if freqs[i] < -cutoff or freqs[i] > cutoff:
+            ftransform[i] = 0
+    return ftransform
+
+def bandstop(transform, cutoff=0.1):
+    ftransform = numpy.copy(transform)
+    freqs = fft.fftfreq(len(ftransform))
+    for i in range(0, len(ftransform)):
+        if freqs[i] >= cutoff:
+            break
+        ftransform[i] = 0
+    for i in range(len(ftransform)-1, 0, -1):
+        if freqs[i] <= -cutoff:
+            break
+        ftransform[i] = 0
     return ftransform
 
 class pid_controller:
@@ -68,7 +80,7 @@ class autopilot:
         self.control = self.vessel.control
 
         self.time_interval = resolution # time between updates in ms
-        self.pv_smoothed = 0
+        self.pv_input_smoothed = 0
         self.pitch_target = pitch_target
 
         datapoint_nb = int(5*1000/self.time_interval) # holds 5*1000ms worth of data
@@ -88,17 +100,17 @@ class autopilot:
         print("pitch : {}\theading : {}\troll: {}\tAoA : {}".format(pitch, attitude.heading, attitude.roll, attitude.angle_of_attack))
 
         self.control.roll = self.roll_controller.control(attitude.roll/90)[0]
-        if self.pv_smoothed != 0:
-            print("last process pitch {}, corrected pitch {}".format(self.data_history[4][-1], self.pv_smoothed))
-            process_pitch = self.pv_smoothed
+        if self.pv_input_smoothed != 0:
+            print("last process pitch {}, corrected pitch {}".format(self.data_history[4][-1], self.pv_input_smoothed))
+            process_pitch = self.pv_input_smoothed
         else:
             process_pitch = self.pitch_target
 
         (control_pitch, p, i, d) = self.pitch_controller.control(process_pitch/90)
         self.control.pitch = control_pitch
 
-        pv_fft, pv_filtered, pv_noise = self.update_flight_data(pitch, control_pitch, p, i, d)
-        return self.update_plots(axes, control_plot, process_plot, pv_freq_plot, pv_filtered_plot, pv_fft, pv_filtered, pv_noise)
+        pv_fft, pv_filtered, pv_smoothed = self.update_flight_data(pitch, control_pitch, p, i, d)
+        return self.update_plots(axes, control_plot, process_plot, pv_freq_plot, pv_filtered_plot, pv_fft, pv_filtered, pv_smoothed)
 
     def update_flight_data(self, process_var, control_var, p, i, d):
         self.data_history[0].append(control_var)
@@ -110,17 +122,16 @@ class autopilot:
 
         if len(self.history) > 6:
             pv_fft = fft.rfft(self.data_history[4])
-            pv_filtered = bandstop(pv_fft)
-            pv_noise = fft.irfft(pv_filtered, len(self.history))
-            #self.pv_noise_correction = 2*pv_noise[-1] - pv_noise[-2] # crude estimation of the next value for the process variable noise
-            self.pv_smoothed = self.data_history[4][-1] - pv_noise[-1] # process variable with estimated noise removed
+            pv_filtered = bandpass(pv_fft)
+            pv_smoothed = fft.irfft(pv_filtered, len(self.history))
+            self.pv_input_smoothed = pv_smoothed[-1] # process variable with estimated noise removed
         else:
             pv_fft = []
             pv_filtered = []
-            pv_noise = []
-        return pv_fft, pv_filtered, pv_noise
+            pv_smoothed = []
+        return pv_fft, pv_filtered, pv_smoothed
 
-    def update_plots(self, control_axes, control, process, frequency, frequency_filtered, pv_fft, pv_filtered, pv_noise):
+    def update_plots(self, control_axes, control, process, frequency, frequency_filtered, pv_fft, pv_filtered, pv_smoothed):
         process[0].set_data(self.history, self.data_history[4])
         control_axes.set_xlim(self.history[0], max(5, self.history[-1]))
         for i in range(0, len(self.data_history)-1):
@@ -131,8 +142,7 @@ class autopilot:
             frequency[0].set_data(freqs, numpy.abs(fft.fftshift(pv_fft)))
             frequency_filtered[0].set_data(freqs, numpy.abs(fft.fftshift(pv_filtered)))
 
-            process[1].set_data(self.history, pv_noise)
-            process[2].set_data(self.history, self.data_history[4] - pv_noise)
+            process[1].set_data(self.history, pv_smoothed)
 
         return (control_axes, control, process, frequency, frequency_filtered)
 
@@ -152,11 +162,11 @@ class autopilot:
         pv_freq_axes.set_ylim(0, 80)
 
         control_plot = control_axes.plot([], [], 'b', [], [], 'c', [], [], 'r', [], [], 'm')
-        process_plot = process_axes.plot([], [], 'b', [], [], 'r', [], [], 'm')
+        process_plot = process_axes.plot([], [], 'b', [], [], 'r')
         pv_freq_plot = pv_freq_axes.plot([], [])
         pv_filtered_plot = pv_filtered_axes.plot([], [])
         control_axes.legend(control_plot, ['pitch control', 'p value', 'i value', 'd value'], loc=3)
-        process_axes.legend(process_plot, ['pitch', 'pitch noise', 'filtered pitch'], loc=3)
+        process_axes.legend(process_plot, ['pitch', 'filtered pitch'], loc=3)
         anim = animation.FuncAnimation(fig, self.update_callback, fargs=(control_axes, control_plot, process_plot, pv_freq_plot, pv_filtered_plot), interval=self.time_interval)
         try:
             pyplot.show()
@@ -166,5 +176,5 @@ class autopilot:
             self.control.sas = sas_state
 
 
-ap = autopilot(remote_address="192.168.2.3", pitch_target=4)
+ap = autopilot(remote_address="192.168.2.3", pitch_target=9)
 ap.run_ap()
