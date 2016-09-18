@@ -68,6 +68,20 @@ class pid_controller:
             print("error {}, p {}, i {}, d {}".format(error, p, i, d))
         return (p + i + d, p, i, d)
 
+class pv_filter:
+    def __init__(self, time_resolution, time_window): # in ms
+        history_size = int(time_window/time_resolution)
+        self.pv_history = deque(maxlen=history_size)
+        self.pv_smoothed = deque(maxlen=history_size)
+    def get_pv_smoothed(self, process_var):
+        self.pv_history.append(process_var)
+        if len(self.pv_history) > 6:
+            pv_fft = fft.rfft(self.pv_history)
+            self.pv_smoothed = fft.irfft(bandpass(pv_fft), len(self.pv_history))
+            return self.pv_smoothed[-1]
+        else:
+            return process_var
+
 class autopilot:
     def __init__(self, remote_address="128.0.0.1", resolution=100, pitch_target=0):
         self.client = krpc.connect(name="ap", address=remote_address)
@@ -79,70 +93,59 @@ class autopilot:
         self.attitude = self.vessel.flight(self.vessel.surface_reference_frame)
         self.control = self.vessel.control
 
-        self.time_interval = resolution # time between updates in ms
-        self.pv_input_smoothed = 0
+        self.time_resolution = resolution # time between updates in ms
+        self.time_window = 5000 # history range in ms
         self.pitch_target = pitch_target
 
-        datapoint_nb = int(5*1000/self.time_interval) # holds 5*1000ms worth of data
+        datapoint_nb = int(self.time_window/self.time_resolution) # holds 5*1000ms worth of data
         self.history = deque(maxlen=datapoint_nb)
-        self.history.append(0)
         self.data_history = []
-        for i in range(0, 5):
+        for i in range(0, 4):
             self.data_history.append(deque(maxlen=datapoint_nb))
-            self.data_history[i].append(0)
 
-        self.pitch_controller = pid_controller(self.pitch_target/90, 3.5, 0.3, 0.01, self.time_interval/1000)
-        self.roll_controller = pid_controller(0, 0.4, 0.1, 0.05, self.time_interval/1000)
+        self.pitch_filter = pv_filter(self.time_resolution, self.time_window)
+        self.pitch_controller = pid_controller(self.pitch_target/90, 3.5, 0.3, 0.01, self.time_resolution/1000)
+        self.roll_controller = pid_controller(0, 0.4, 0.1, 0.05, self.time_resolution/1000)
 
     def update_callback(self, frame, axes, control_plot, process_plot, pv_freq_plot, pv_filtered_plot):
         attitude = self.attitude
         pitch = attitude.pitch
-        print("pitch : {}\theading : {}\troll: {}\tAoA : {}".format(pitch, attitude.heading, attitude.roll, attitude.angle_of_attack))
 
         self.control.roll = self.roll_controller.control(attitude.roll/90)[0]
-        if self.pv_input_smoothed != 0:
-            print("last process pitch {}, corrected pitch {}".format(self.data_history[4][-1], self.pv_input_smoothed))
-            process_pitch = self.pv_input_smoothed
-        else:
-            process_pitch = self.pitch_target
-
+        process_pitch = self.pitch_filter.get_pv_smoothed(pitch)
+        print("process pitch {}, corrected pitch {}".format(pitch, process_pitch))
         (control_pitch, p, i, d) = self.pitch_controller.control(process_pitch/90)
         self.control.pitch = control_pitch
 
-        pv_fft, pv_filtered, pv_smoothed = self.update_flight_data(pitch, control_pitch, p, i, d)
-        return self.update_plots(axes, control_plot, process_plot, pv_freq_plot, pv_filtered_plot, pv_fft, pv_filtered, pv_smoothed)
+        self.update_flight_data(control_pitch, p, i, d)
+        return self.update_plots(axes, control_plot, process_plot, pv_freq_plot, pv_filtered_plot)
 
-    def update_flight_data(self, process_var, control_var, p, i, d):
+    def update_flight_data(self, control_var, p, i, d):
         self.data_history[0].append(control_var)
         self.data_history[1].append(p)
         self.data_history[2].append(i)
         self.data_history[3].append(d)
-        self.data_history[4].append(process_var)
-        self.history.append(self.history[-1] + self.time_interval/1000)
+        try:
+            self.history.append(self.history[-1] + self.time_resolution/1000)
+        except IndexError:
+            self.history.append(0)
 
-        if len(self.history) > 6:
-            pv_fft = fft.rfft(self.data_history[4])
-            pv_filtered = bandpass(pv_fft)
-            pv_smoothed = fft.irfft(pv_filtered, len(self.history))
-            self.pv_input_smoothed = pv_smoothed[-1] # process variable with estimated noise removed
-        else:
-            pv_fft = []
-            pv_filtered = []
-            pv_smoothed = []
-        return pv_fft, pv_filtered, pv_smoothed
-
-    def update_plots(self, control_axes, control, process, frequency, frequency_filtered, pv_fft, pv_filtered, pv_smoothed):
-        process[0].set_data(self.history, self.data_history[4])
+    def update_plots(self, control_axes, control, process, frequency, frequency_filtered):
+        process[0].set_data(self.history, self.pitch_filter.pv_history)
+        if len(self.pitch_filter.pv_smoothed) > 0:
+            process[1].set_data(self.history, self.pitch_filter.pv_smoothed)
         control_axes.set_xlim(self.history[0], max(5, self.history[-1]))
-        for i in range(0, len(self.data_history)-1):
+        for i in range(0, len(self.data_history)):
             control[i].set_data(self.history, self.data_history[i])
 
+        """
         if len(pv_fft) > 0:
             freqs = fft.fftshift(fft.fftfreq(len(pv_fft)))
             frequency[0].set_data(freqs, numpy.abs(fft.fftshift(pv_fft)))
             frequency_filtered[0].set_data(freqs, numpy.abs(fft.fftshift(pv_filtered)))
 
             process[1].set_data(self.history, pv_smoothed)
+        """
 
         return (control_axes, control, process, frequency, frequency_filtered)
 
@@ -167,7 +170,7 @@ class autopilot:
         pv_filtered_plot = pv_filtered_axes.plot([], [])
         control_axes.legend(control_plot, ['pitch control', 'p value', 'i value', 'd value'], loc=3)
         process_axes.legend(process_plot, ['pitch', 'filtered pitch'], loc=3)
-        anim = animation.FuncAnimation(fig, self.update_callback, fargs=(control_axes, control_plot, process_plot, pv_freq_plot, pv_filtered_plot), interval=self.time_interval)
+        anim = animation.FuncAnimation(fig, self.update_callback, fargs=(control_axes, control_plot, process_plot, pv_freq_plot, pv_filtered_plot), interval=self.time_resolution)
         try:
             pyplot.show()
         except KeyboardInterrupt:
