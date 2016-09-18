@@ -78,18 +78,21 @@ class pid_controller:
         self.cv_history.append(p+i+d)
         return p + i + d
 
-class pv_filter:
+class lowpass_filter:
     def __init__(self, time_resolution, time_window): # in ms
         history_size = int(time_window/time_resolution)
-        self.pv_history = deque(maxlen=history_size)
-        self.pv_smoothed = deque(maxlen=history_size)
-    def get_pv_smoothed(self, process_var):
-        self.pv_history.append(process_var)
-        if len(self.pv_history) > 6:
-            pv_fft = fft.rfft(self.pv_history)
-            self.pv_smoothed = fft.irfft(bandpass(pv_fft), len(self.pv_history))
-            return self.pv_smoothed[-1]
+        self.raw_history = deque(maxlen=history_size)
+        self.smoothed = deque(maxlen=history_size)
+        self.smoothed_history = deque(maxlen=history_size)
+    def get_smoothed(self, process_var):
+        self.raw_history.append(process_var)
+        if len(self.raw_history) > 6:
+            transform = fft.rfft(self.raw_history)
+            self.smoothed = fft.irfft(bandpass(transform), len(self.raw_history))
+            self.smoothed_history.append(self.smoothed[-1])
+            return self.smoothed[-1]
         else:
+            self.smoothed_history.append(process_var)
             return process_var
 
 class autopilot:
@@ -110,18 +113,17 @@ class autopilot:
         history_size = int(self.time_window/self.time_resolution) # holds 5000ms worth of data
         self.history = deque(maxlen=history_size)
 
-        self.pitch_filter = pv_filter(self.time_resolution, self.time_window)
+        self.pitch_filter = lowpass_filter(self.time_resolution, self.time_window)
         self.pitch_controller = pid_controller(self.pitch_target/90, 3.5, 0.3, 0.01, self.time_resolution, self.time_window)
         self.roll_controller = pid_controller(0, 0.4, 0.1, 0.05, self.time_resolution, self.time_window)
 
     def update_callback(self, frame, axes, subplots):
         attitude = self.attitude
-        pitch = attitude.pitch
-
         self.control.roll = self.roll_controller.control(attitude.roll/90)
-        process_pitch = self.pitch_filter.get_pv_smoothed(pitch)
-        print("process pitch {}, corrected pitch {}".format(pitch, process_pitch))
-        self.control.pitch = self.pitch_controller.control(process_pitch/90)
+        control_pitch = self.pitch_controller.control(attitude.pitch/90)
+        control_pitch_corrected = self.pitch_filter.get_smoothed(control_pitch)
+        #print("process pitch {}, corrected pitch {}".format(control_pitch, control_pitch_corrected))
+        self.control.pitch = control_pitch_corrected
 
         try:
             self.history.append(self.history[-1] + self.time_resolution/1000)
@@ -133,15 +135,16 @@ class autopilot:
     def update_plots(self, axes, subplots):
         control_plot = subplots[0]
         process_plot = subplots[1]
-        process_plot[0].set_data(self.history, self.pitch_filter.pv_history)
-        if len(self.pitch_filter.pv_smoothed) > 0:
-            process_plot[1].set_data(self.history, self.pitch_filter.pv_smoothed)
-
         axes.set_xlim(self.history[0], max(5, self.history[-1]))
-        control_plot[0].set_data(self.history, self.pitch_controller.cv_history)
+
         control_plot[1].set_data(self.history, self.pitch_controller.p_history)
         control_plot[2].set_data(self.history, self.pitch_controller.i_history)
         control_plot[3].set_data(self.history, self.pitch_controller.d_history)
+
+        process_plot[0].set_data(self.history, self.pitch_controller.cv_history)
+        if len(self.pitch_filter.smoothed) > 0:
+            process_plot[1].set_data(self.history, self.pitch_filter.smoothed)
+        process_plot[2].set_data(self.history, self.pitch_filter.smoothed_history)
 
         """
         if len(pv_fft) > 0:
@@ -166,16 +169,16 @@ class autopilot:
 
         control_axes.set_xlim(0, 5)
         control_axes.set_ylim(-1.5, 1.5)
-        process_axes.set_ylim(-40, 40)
+        process_axes.set_ylim(-1.5, 1.5)
         pv_freq_axes.set_xlim(-5, 5)
         pv_freq_axes.set_ylim(0, 80)
 
         control_plot = control_axes.plot([], [], 'b', [], [], 'c', [], [], 'r', [], [], 'm')
-        process_plot = process_axes.plot([], [], 'b', [], [], 'r')
+        process_plot = process_axes.plot([], [], 'b', [], [], 'r', [], [], 'c')
         pv_freq_plot = pv_freq_axes.plot([], [])
         pv_filtered_plot = pv_filtered_axes.plot([], [])
         control_axes.legend(control_plot, ['pitch control', 'p value', 'i value', 'd value'], loc=3)
-        process_axes.legend(process_plot, ['pitch', 'filtered pitch'], loc=3)
+        process_axes.legend(process_plot, ['pitch', 'instant filtered pitch', 'filtered pitch history'], loc=3)
         anim = animation.FuncAnimation(fig, self.update_callback, fargs=(control_axes, [control_plot, process_plot]), interval=self.time_resolution)
         try:
             pyplot.show()
@@ -185,5 +188,5 @@ class autopilot:
             self.control.sas = sas_state
 
 
-ap = autopilot(remote_address="192.168.2.3", pitch_target=9)
+ap = autopilot(remote_address="192.168.2.3", pitch_target=15)
 ap.run_ap()
