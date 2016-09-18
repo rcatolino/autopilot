@@ -107,7 +107,7 @@ class autopilot:
         self.pitch_controller = pid_controller(self.pitch_target/90, 3.5, 0.3, 0.01, self.time_resolution/1000)
         self.roll_controller = pid_controller(0, 0.4, 0.1, 0.05, self.time_resolution/1000)
 
-    def update_callback(self, frame, axes, control_plot, process_plot, pv_freq_plot, pv_filtered_plot):
+    def update_callback(self, frame, axes, subplots):
         attitude = self.attitude
         pitch = attitude.pitch
 
@@ -118,7 +118,7 @@ class autopilot:
         self.control.pitch = control_pitch
 
         self.update_flight_data(control_pitch, p, i, d)
-        return self.update_plots(axes, control_plot, process_plot, pv_freq_plot, pv_filtered_plot)
+        return self.update_plots(axes, subplots)
 
     def update_flight_data(self, control_var, p, i, d):
         self.data_history[0].append(control_var)
@@ -130,13 +130,16 @@ class autopilot:
         except IndexError:
             self.history.append(0)
 
-    def update_plots(self, control_axes, control, process, frequency, frequency_filtered):
-        process[0].set_data(self.history, self.pitch_filter.pv_history)
+    def update_plots(self, axes, subplots):
+        control_plot = subplots[0]
+        process_plot = subplots[1]
+        process_plot[0].set_data(self.history, self.pitch_filter.pv_history)
         if len(self.pitch_filter.pv_smoothed) > 0:
-            process[1].set_data(self.history, self.pitch_filter.pv_smoothed)
-        control_axes.set_xlim(self.history[0], max(5, self.history[-1]))
+            process_plot[1].set_data(self.history, self.pitch_filter.pv_smoothed)
+
+        axes.set_xlim(self.history[0], max(5, self.history[-1]))
         for i in range(0, len(self.data_history)):
-            control[i].set_data(self.history, self.data_history[i])
+            control_plot[i].set_data(self.history, self.data_history[i])
 
         """
         if len(pv_fft) > 0:
@@ -147,12 +150,13 @@ class autopilot:
             process[1].set_data(self.history, pv_smoothed)
         """
 
-        return (control_axes, control, process, frequency, frequency_filtered)
+        return (axes, subplots)
 
     def run_ap(self):
         sas_state = self.control.sas
         self.control.sas = False
         fig = pyplot.figure()
+
         control_axes = fig.add_subplot(2,2,1)
         process_axes = fig.add_subplot(2,2,3, sharex=control_axes)
         pv_freq_axes = fig.add_subplot(2,2,2)
@@ -170,7 +174,7 @@ class autopilot:
         pv_filtered_plot = pv_filtered_axes.plot([], [])
         control_axes.legend(control_plot, ['pitch control', 'p value', 'i value', 'd value'], loc=3)
         process_axes.legend(process_plot, ['pitch', 'filtered pitch'], loc=3)
-        anim = animation.FuncAnimation(fig, self.update_callback, fargs=(control_axes, control_plot, process_plot, pv_freq_plot, pv_filtered_plot), interval=self.time_resolution)
+        anim = animation.FuncAnimation(fig, self.update_callback, fargs=(control_axes, [control_plot, process_plot]), interval=self.time_resolution)
         try:
             pyplot.show()
         except KeyboardInterrupt:
