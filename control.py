@@ -153,19 +153,19 @@ class autopilot:
         self.roll_filter = freq_filter(self.time_resolution, self.time_window)
         self.roll_noise = freq_filter(self.time_resolution, self.time_window/5, cutoff=0.01)
         self.pitch_controller = pid_controller(self.pitch_target/90, 4, 0.5, 0, self.time_resolution, self.time_window)
-        self.roll_controller = pid_controller(0, 0.3, 0, 0, self.time_resolution, self.time_window)
+        self.roll_controller = pid_controller(0, 0.4, 0, 0, self.time_resolution, self.time_window)
 
     def update_callback(self, frame, axes):
         attitude = self.attitude
         vessel_roll = attitude.roll
         self.roll_noise.update_data(vessel_roll/90)
         self.roll_filter.update_data(self.roll_controller.control(vessel_roll/90))
-        self.control.roll = self.roll_filter.get_smoothed() - 0.5 * self.roll_noise.get_oscillation()
+        self.control.roll = self.roll_filter.get_smoothed() - 0.8 * self.roll_noise.get_oscillation()
 
         vessel_pitch = attitude.pitch
         self.pitch_noise.update_data(vessel_pitch/90)
         self.pitch_filter.update_data(self.pitch_controller.control(vessel_pitch/90))
-        self.control.pitch = self.pitch_filter.get_smoothed() - 0.8 * self.pitch_noise.get_oscillation()
+        self.control.pitch = self.pitch_filter.get_smoothed() - 0.9 * self.pitch_noise.get_oscillation()
         #print("process pitch {}, corrected pitch {}".format(control_pitch, control_pitch_corrected))
 
         try:
