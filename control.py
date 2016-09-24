@@ -79,24 +79,56 @@ class pid_controller:
         self.cv_history.append(p+i+d)
         return p + i + d
 
-class lowpass_filter:
-    def __init__(self, time_resolution, time_window, history_window=0): # in ms
-        if history_window == 0:
-            history_window=time_window
+class freq_filter:
+    def __init__(self, time_resolution, time_window, cutoff=0.1): # in ms
+        self.cutoff = cutoff
+        self.time_resolution = time_resolution
         history_size = int(time_window/time_resolution)
         self.raw_history = deque(maxlen=history_size)
-        self.smoothed = deque(maxlen=history_size)
-        self.smoothed_history = deque(maxlen=int(history_window/time_resolution))
-    def get_smoothed(self, process_var):
+        self.smoothed = []
+        self.oscillation = []
+        self.smoothed_history = deque(maxlen=history_size)
+        self.oscillation_history = deque(maxlen=history_size)
+        self.history = deque(maxlen=history_size)
+
+    def update_data(self, process_var):
+        try:
+            self.history.append(self.history[-1] + self.time_resolution/1000)
+        except IndexError:
+            self.history.append(0)
         self.raw_history.append(process_var)
         if len(self.raw_history) > 6:
             transform = fft.rfft(self.raw_history)
-            self.smoothed = fft.irfft(bandpass(transform), len(self.raw_history))
+            self.smoothed = fft.irfft(bandpass(transform, cutoff=self.cutoff), len(self.raw_history))
             self.smoothed_history.append(self.smoothed[-1])
-            return self.smoothed[-1]
+            self.oscillation = fft.irfft(bandstop(transform, cutoff=self.cutoff), len(self.raw_history))
+            self.oscillation_history.append(self.oscillation[-1])
         else:
             self.smoothed_history.append(process_var)
-            return process_var
+            self.oscillation_history.append(0)
+
+    def plot_data(self, axe):
+        plots = axe.get_lines()
+        axe.set_xlim(self.history[0], max(1, self.history[-1]))
+
+        if len(plots) == 0:
+            for _ in range(0, 4):
+                axe.plot([], [])
+            plots = axe.get_lines()
+            axe.legend(plots, ['raw history', 'instant oscillation', 'oscillation history', 'smoothed history'], loc=4)
+            axe.set_ylim(-0.9, 0.9)
+
+        plots[0].set_data(self.history, self.raw_history)
+        if len(self.oscillation) > 0:
+            plots[1].set_data(self.history, self.oscillation)
+        plots[2].set_data(self.history, self.oscillation_history)
+        plots[3].set_data(self.history, self.smoothed_history)
+
+    def get_oscillation(self):
+        return self.oscillation_history[-1]
+
+    def get_smoothed(self):
+        return self.smoothed_history[-1]
 
 class autopilot:
     def __init__(self, remote_address="128.0.0.1", resolution=100, pitch_target=0):
@@ -116,76 +148,45 @@ class autopilot:
         history_size = int(self.time_window/self.time_resolution) # holds 5000ms worth of data
         self.history = deque(maxlen=history_size)
 
-        self.pitch_filter = lowpass_filter(self.time_resolution, self.time_window)
-        self.roll_filter = lowpass_filter(self.time_resolution, self.time_window/5, self.time_window)
-        self.pitch_controller = pid_controller(self.pitch_target/90, 3.5, 0.3, 0.01, self.time_resolution, self.time_window)
-        self.roll_controller = pid_controller(0, 0.3, 0.1, 0.01, self.time_resolution, self.time_window)
+        self.pitch_filter = freq_filter(self.time_resolution, self.time_window)
+        self.pitch_noise = freq_filter(self.time_resolution, self.time_window/4, cutoff=0.05)
+        self.roll_filter = freq_filter(self.time_resolution, self.time_window)
+        self.roll_noise = freq_filter(self.time_resolution, self.time_window/5, cutoff=0.01)
+        self.pitch_controller = pid_controller(self.pitch_target/90, 4, 0.5, 0, self.time_resolution, self.time_window)
+        self.roll_controller = pid_controller(0, 0.3, 0, 0, self.time_resolution, self.time_window)
 
-    def update_callback(self, frame, axes, subplots):
+    def update_callback(self, frame, axes):
         attitude = self.attitude
-        self.control.roll = self.roll_filter.get_smoothed(self.roll_controller.control(attitude.roll/90))
-        control_pitch = self.pitch_controller.control(attitude.pitch/90)
-        control_pitch_corrected = self.pitch_filter.get_smoothed(control_pitch)
+        vessel_roll = attitude.roll
+        self.roll_noise.update_data(vessel_roll/90)
+        self.roll_filter.update_data(self.roll_controller.control(vessel_roll/90))
+        self.control.roll = self.roll_filter.get_smoothed() - 0.5 * self.roll_noise.get_oscillation()
+
+        vessel_pitch = attitude.pitch
+        self.pitch_noise.update_data(vessel_pitch/90)
+        self.pitch_filter.update_data(self.pitch_controller.control(vessel_pitch/90))
+        self.control.pitch = self.pitch_filter.get_smoothed() - 0.8 * self.pitch_noise.get_oscillation()
         #print("process pitch {}, corrected pitch {}".format(control_pitch, control_pitch_corrected))
-        self.control.pitch = control_pitch_corrected
 
         try:
             self.history.append(self.history[-1] + self.time_resolution/1000)
         except IndexError:
             self.history.append(0)
 
-        return self.update_plots(axes, subplots)
+        return self.update_plots(axes)
 
-    def update_plots(self, axes, subplots):
-        pitch_plot = subplots[0]
-        roll_plot = subplots[1]
-        axes.set_xlim(self.history[0], max(5, self.history[-1]))
-
-        pitch_plot[0].set_data(self.history, self.pitch_controller.p_history)
-        pitch_plot[1].set_data(self.history, self.pitch_controller.i_history)
-        pitch_plot[2].set_data(self.history, self.pitch_controller.d_history)
-        pitch_plot[3].set_data(self.history, self.pitch_controller.cv_history)
-        pitch_plot[4].set_data(self.history, self.pitch_filter.smoothed_history)
-
-        roll_plot[0].set_data(self.history, self.roll_controller.p_history)
-        roll_plot[1].set_data(self.history, self.roll_controller.i_history)
-        roll_plot[2].set_data(self.history, self.roll_controller.d_history)
-        roll_plot[3].set_data(self.history, self.roll_controller.cv_history)
-        roll_plot[4].set_data(self.history, self.roll_filter.smoothed_history)
-
-        """
-        if len(pv_fft) > 0:
-            freqs = fft.fftshift(fft.fftfreq(len(pv_fft)))
-            frequency[0].set_data(freqs, numpy.abs(fft.fftshift(pv_fft)))
-            frequency_filtered[0].set_data(freqs, numpy.abs(fft.fftshift(pv_filtered)))
-
-            process[1].set_data(self.history, pv_smoothed)
-        """
-
-        return (axes, subplots)
+    def update_plots(self, axes):
+        self.roll_noise.plot_data(axes[0])
+        self.pitch_noise.plot_data(axes[1])
+        return (axes,)
 
     def run_ap(self):
         sas_state = self.control.sas
         self.control.sas = False
         fig = pyplot.figure()
 
-        axes1 = fig.add_subplot(2,2,1)
-        axes2 = fig.add_subplot(2,2,3, sharex=axes1, sharey=axes1)
-        pv_freq_axes = fig.add_subplot(2,2,2)
-        pv_filtered_axes = fig.add_subplot(2,2,4, sharex=pv_freq_axes, sharey=pv_freq_axes)
-
-        axes1.set_xlim(0, 5)
-        axes1.set_ylim(-0.5, 0.5)
-        pv_freq_axes.set_xlim(-5, 5)
-        pv_freq_axes.set_ylim(0, 80)
-
-        plot1 = axes1.plot([], [], 'b', [], [], 'c', [], [], 'r', [], [], 'm', [], [], 'y')
-        plot2 = axes2.plot([], [], 'b', [], [], 'c', [], [], 'r', [], [], 'm', [], [], 'y')
-        pv_freq_plot = pv_freq_axes.plot([], [])
-        pv_filtered_plot = pv_filtered_axes.plot([], [])
-        axes1.legend(plot1, ['p value', 'i value', 'd value', 'pitch control', 'smoothed pitch control'], loc=3)
-        axes2.legend(plot2, ['p value', 'i value', 'd value', 'roll control', 'smoothed roll control'], loc=3)
-        anim = animation.FuncAnimation(fig, self.update_callback, fargs=(axes1, [plot1, plot2]), interval=self.time_resolution)
+        axes = [fig.add_subplot(2,2,1), fig.add_subplot(2,2,2), fig.add_subplot(2,2,3), fig.add_subplot(2,2,4)]
+        anim = animation.FuncAnimation(fig, self.update_callback, fargs=(axes,), interval=self.time_resolution)
         try:
             pyplot.show()
         except KeyboardInterrupt:
